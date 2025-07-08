@@ -12,15 +12,17 @@
 ### 🎯 專案特色
 
 - **Repository 模式**：使用 Spring Data MongoDB Repository 簡化資料存取
-- **自定義轉換器**：Money 類型的序列化與反序列化
+- **完整轉換器系統**：支援 Money 類型的雙向轉換（Document ↔ Money, Long ↔ Money）
 - **完整 CRUD 操作**：創建、查詢、更新、刪除咖啡記錄
-- **循環依賴解決方案**：展示 Spring Boot 配置最佳實踐
+- **數據類型相容性**：解決 MongoDB 儲存格式不一致問題
 - **容器化支援**：支援 Docker MongoDB 部署
+- **測試友好配置**：支援測試環境隔離和模擬
 
 > 💡 **適合學習對象**  
 > - Spring Boot 初學者想了解 MongoDB 整合
 > - 後端開發者學習 NoSQL 資料庫操作
 > - 架構師參考 Spring Data Repository 設計模式
+> - 想了解 MongoDB 類型轉換問題解決方案的開發者
 
 ## 技術棧
 
@@ -74,19 +76,16 @@ docker run -d --name mongo -p 27017:27017 mongo:latest
 docker ps
 ```
 
-#### 3. 建立 MongoDB 資料庫和使用者
+#### 3. 簡化配置 (推薦)
+
+為了簡化開發和測試，我們已將配置修改為無認證模式：
 
 ```bash
-# 連接到 MongoDB
+# 直接連接到 MongoDB（無需認證）
 docker exec -it mongo mongosh
 
-# 建立 springbucks 資料庫和使用者
-use springbucks
-db.createUser({
-  user: "springbucks", 
-  pwd: "springbucks", 
-  roles: [{role: "readWrite", db: "springbucks"}]
-})
+# 驗證連接並查看資料庫
+show dbs
 
 # 退出 MongoDB shell
 exit
@@ -124,7 +123,9 @@ mongo-repository-demo/
 │   │   │       ├── repository/
 │   │   │       │   └── CoffeeRepository.java              # Repository 接口
 │   │   │       └── converter/
-│   │   │           └── MoneyReadConverter.java            # Money 轉換器
+│   │   │           ├── MoneyReadConverter.java            # Document→Money 轉換器
+│   │   │           ├── MoneyLongReadConverter.java        # Long→Money 轉換器  
+│   │   │           └── MoneyWriteConverter.java           # Money→Long 轉換器
 │   │   └── resources/
 │   │       └── application.properties                     # 應用配置檔
 │   └── test/
@@ -171,22 +172,54 @@ public interface CoffeeRepository extends MongoRepository<Coffee, String> {
 - `deleteAll()` - 刪除所有記錄
 - `insert(Iterable<T> entities)` - 批量插入
 
-### 🔄 MoneyReadConverter 自定義轉換器
+### 🔄 Money 轉換器系統
 
+我們實作了完整的 Money 轉換器系統來處理不同的資料格式：
+
+#### MoneyReadConverter (Document → Money)
 ```java
 @ReadingConverter
-public class MoneyReadConverter implements Converter<NumberLong, Money> {
+public class MoneyReadConverter implements Converter<Document, Money> {
     @Override
-    public Money convert(NumberLong source) {
-        return Money.ofMinor(CurrencyUnit.of("TWD"), source.longValue());
+    public Money convert(Document source) {
+        Document money = (Document) source.get("money");
+        double amount = money.getDouble("amount");
+        String currency = ((Document) money.get("currency")).getString("code");
+        return Money.of(CurrencyUnit.of(currency), amount);
     }
 }
 ```
 
-**功能說明：**
-- 將 MongoDB 中的 `NumberLong` 轉換為 `Money` 對象
-- 使用台幣（TWD）作為預設貨幣
-- 自動處理小數位轉換
+#### MoneyLongReadConverter (Long → Money)
+```java
+@ReadingConverter
+public class MoneyLongReadConverter implements Converter<Long, Money> {
+    @Override
+    public Money convert(Long source) {
+        // 將 Long 值轉換為台幣 Money 對象（假設存儲的是以分為單位）
+        return Money.ofMinor(CurrencyUnit.of("TWD"), source);
+    }
+}
+```
+
+#### MoneyWriteConverter (Money → Long)
+```java
+@WritingConverter
+public class MoneyWriteConverter implements Converter<Money, Long> {
+    @Override
+    public Long convert(Money source) {
+        // 將 Money 轉換為以分為單位的 Long 值存儲
+        return source.getAmountMinorLong();
+    }
+}
+```
+
+**轉換器功能說明：**
+- **MoneyReadConverter**：處理複雜 Document 格式的 Money 數據
+- **MoneyLongReadConverter**：處理簡單 Long 格式的 Money 數據
+- **MoneyWriteConverter**：將 Money 對象轉換為 Long 存儲
+- 支援台幣（TWD）和其他貨幣格式
+- 自動處理小數位和貨幣單位轉換
 
 ### ⚙️ MongoConfig 配置類
 
@@ -195,24 +228,27 @@ public class MoneyReadConverter implements Converter<NumberLong, Money> {
 public class MongoConfig {
     @Bean
     public MongoCustomConversions mongoCustomConversions() {
-        return new MongoCustomConversions(Arrays.asList(new MoneyReadConverter()));
+        return new MongoCustomConversions(Arrays.asList(
+            new MoneyReadConverter(),        // Document -> Money
+            new MoneyLongReadConverter(),    // Long -> Money  
+            new MoneyWriteConverter()        // Money -> Long
+        ));
     }
 }
 ```
 
 **設計目的：**
-- 解決循環依賴問題
-- 集中管理 MongoDB 自定義配置
-- 註冊自定義轉換器
+- 註冊多個自定義轉換器
+- 解決資料格式不一致問題
+- 支援向前和向後相容性
+- 提供靈活的資料類型轉換
 
 ## 🚀 運行結果示例
 
 成功運行後，您會看到類似以下的輸出：
 
 ```log
-2025-06-27 14:16:53.624 INFO --- Saved Coffee Coffee(id=..., name=espresso, price=TWD 100.00, createTime=...)
-2025-06-27 14:16:53.630 INFO --- Saved Coffee Coffee(id=..., name=latte, price=TWD 150.00, createTime=...)
-2025-06-27 14:16:54.649 INFO --- Coffee Coffee(id=..., name=latte, price=TWD 175.00, updateTime=...)
+2025-07-08 11:04:31.486 INFO --- Coffee Coffee(id=686c8abf2e68ee1bf8f04e84, name=espresso, price=TWD 100.00, createTime=Tue Jul 08 11:04:31 CST 2025, updateTime=Tue Jul 08 11:04:31 CST 2025)
 ```
 
 ### 📊 執行流程
@@ -227,11 +263,16 @@ public class MongoConfig {
 ### application.properties
 
 ```properties
-# MongoDB 連線配置
-spring.data.mongodb.uri=mongodb://springbucks:springbucks@localhost:27017/springbucks
+# 簡化的 MongoDB 連接配置（無認證）
+spring.data.mongodb.host=localhost
+spring.data.mongodb.port=27017
+spring.data.mongodb.database=springbucks
+
+# 如果需要認證，請先在 MongoDB 中創建用戶
+# spring.data.mongodb.uri=mongodb://springbucks:springbucks@localhost:27017/springbucks
 
 # 日誌等級設定（可選）
-logging.level.org.springframework.data.mongodb.core=DEBUG
+logging.level.org.springframework.data.mongodb.core=INFO
 ```
 
 ### 環境變數配置（建議）
@@ -241,13 +282,13 @@ logging.level.org.springframework.data.mongodb.core=DEBUG
 export MONGO_HOST=localhost
 export MONGO_PORT=27017
 export MONGO_DB=springbucks
-export MONGO_USER=springbucks
-export MONGO_PASS=springbucks
 ```
 
 ```properties
 # 在 application.properties 中使用環境變數
-spring.data.mongodb.uri=mongodb://${MONGO_USER}:${MONGO_PASS}@${MONGO_HOST}:${MONGO_PORT}/${MONGO_DB}
+spring.data.mongodb.host=${MONGO_HOST:localhost}
+spring.data.mongodb.port=${MONGO_PORT:27017}
+spring.data.mongodb.database=${MONGO_DB:springbucks}
 ```
 
 ## 故障排除
@@ -257,9 +298,10 @@ spring.data.mongodb.uri=mongodb://${MONGO_USER}:${MONGO_PASS}@${MONGO_HOST}:${MO
 | 問題 | 症狀 | 解決方案 |
 |-----|------|----------|
 | **MongoDB 連線失敗** | `MongoTimeoutException` | 檢查容器是否運行：`docker ps` |
-| **認證失敗** | `AuthenticationFailed` | 確認使用者已建立且密碼正確 |
-| **循環依賴錯誤** | `BeanCurrentlyInCreationException` | 確保 `MongoConfig` 類存在 |
-| **Money 轉換錯誤** | `ClassCastException` | 檢查 `MoneyReadConverter` 是否註冊 |
+| **Money 轉換錯誤** | `ConverterNotFoundException: Long to Money` | 已修復：新增 `MoneyLongReadConverter` |
+| **測試失敗** | `IllegalStateException` | 已修復：使用 `@MockBean` 隔離測試 |
+| **資料格式不一致** | `ClassCastException` | 已修復：多重轉換器支援 |
+| **認證失敗** | `AuthenticationFailed` | 使用無認證配置或確認使用者設定 |
 
 ### 🛠️ 除錯命令
 
@@ -278,6 +320,9 @@ mvn spring-boot:run -Dspring-boot.run.arguments="--debug"
 
 # 檢查網路連接
 telnet localhost 27017
+
+# 運行測試查看詳細錯誤
+mvn test -X
 ```
 
 ### 🔍 資料庫操作
@@ -289,7 +334,10 @@ telnet localhost 27017
 db.coffee.find().pretty()
 
 // 查看特定咖啡
-db.coffee.find({name: "latte"})
+db.coffee.find({name: "espresso"})
+
+// 檢查資料格式
+db.coffee.findOne()
 
 // 檢查資料庫統計
 db.coffee.countDocuments()
@@ -298,7 +346,24 @@ db.coffee.countDocuments()
 db.coffee.deleteMany({})
 ```
 
-## 學習要點
+## 技術亮點與修復
+
+### 🔧 最近修復
+
+1. **Money 轉換器問題解決**
+   - 新增 `MoneyLongReadConverter` 處理 Long 到 Money 轉換
+   - 新增 `MoneyWriteConverter` 處理 Money 到 Long 轉換
+   - 支援多種資料格式的向前相容
+
+2. **測試配置優化**
+   - 使用 `@MockBean` 隔離測試環境
+   - 防止測試時執行 `CommandLineRunner`
+   - 簡化測試配置
+
+3. **MongoDB 配置簡化**
+   - 移除複雜的認證配置
+   - 支援開發環境快速啟動
+   - 提供認證配置選項
 
 ### 📚 核心概念
 
@@ -315,6 +380,7 @@ db.coffee.deleteMany({})
 3. **自定義轉換器**
    - `@ReadingConverter` 讀取轉換
    - `@WritingConverter` 寫入轉換
+   - 多重轉換器註冊
    - 類型安全的資料轉換
 
 4. **Spring Boot 自動配置**
@@ -329,6 +395,7 @@ db.coffee.deleteMany({})
 - **事務處理**：MongoDB 多文件事務
 - **索引優化**：MongoDB 索引策略
 - **監控和效能**：應用程式效能監控
+- **類型轉換**：複雜資料類型的序列化/反序列化
 
 ## 擴展功能
 
@@ -342,6 +409,8 @@ db.coffee.deleteMany({})
 - [ ] 實作快取機制
 - [ ] 新增監控和指標
 - [ ] Docker Compose 一鍵部署
+- [x] 修復 Money 轉換器問題
+- [x] 優化測試配置
 
 ## 貢獻指南
 
@@ -369,6 +438,7 @@ db.coffee.deleteMany({})
 
 ---
 
-**📅 最後更新：2025-06-27**  
+**📅 最後更新：2025-07-08**  
 **👨‍💻 維護者：風清雲談團隊**  
+**🔧 版本：v1.1.0 - 修復 Money 轉換器問題**  
 **⭐ 如果這個專案對您有幫助，請給我們一個 Star！** 
