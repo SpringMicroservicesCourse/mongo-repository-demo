@@ -28,7 +28,6 @@ public class MongoRepositoryDemoApplication implements CommandLineRunner {
 	}
 
 
-
 	@Override
 	public void run(String... args) throws Exception {
 		Coffee espresso = Coffee.builder()
